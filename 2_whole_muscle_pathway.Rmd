@@ -1,0 +1,310 @@
+---
+title: "Pathway Analysis for Whole Skeletal Muscle"
+author: "MSoria"
+date: '2025-07-21'
+output:
+  html_notebook:
+    theme: lumen
+    toc: yes
+    toc_float: true
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+---
+
+# Purpose
+
+This markdown file aims to perform a pathway analysis on the differentially expressed genes of an exercise intervention study.
+
+### Install and load prerequisite R-packages
+
+```{r load library, message=FALSE, warning=FALSE, include=FALSE, paged.print=TRUE}
+# Installation of some useful packages
+suppressPackageStartupMessages({c(
+  if(!isTRUE(require("prettydoc"))){install.packages("prettydoc")},
+  if(!isTRUE(require("readxl"))){install.packages("readxl")},
+  library(prettydoc),
+  library(readxl), # reads excel files
+  library(here), # finds files based on current working directory
+  library(DESeq2),
+  library(biomaRt),
+  library(tidyverse),
+  library(dplyr),
+  library(msigdbr),
+  library(clusterProfiler),
+  library(enrichplot),
+  library(pathview)
+  )})
+
+# load self-authored functions 
+source("functions.R")
+
+set.seed(42)
+
+```
+
+# Load Differentially Expressed Genes
+```{r}
+ddsResults_list <- readRDS("rds/ddsResults_wholeMusc.rds")
+
+# create clusterProfiler inputs for ORA and GSEA
+pre_3h_input <- cProfilr_input(ddsResults_list[[1]])
+pre_post_input <- cProfilr_input(ddsResults_list[[2]])
+post_3h_input <- cProfilr_input(ddsResults_list[[3]])
+
+```
+
+
+# Get gene set data 
+Using the **msigdbr library** from the [Broad Institute's Molecular Signatures Database](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp).
+
+```{r echo=TRUE}
+# GO-Biological pathways
+GO_BP <- msigdbr(species = "Homo sapiens", 
+                 collection = "C5", subcollection = "BP") %>% 
+  dplyr::distinct(gs_name, ensembl_gene) %>% as.data.frame() %>% 
+  mutate(gs_name = gsub("GOBP_", "", .$gs_name)) %>% 
+  mutate(gs_name = gsub("_", " ", .$gs_name)) %>%  
+  as.data.frame()
+
+# Reactome pathways
+reactome <- msigdbr(species = "Homo sapiens", 
+                 collection = "C2", subcollection = "CP:REACTOME") %>% 
+  dplyr::distinct(gs_name, ensembl_gene) %>% 
+  mutate(gs_name = gsub("REACTOME_", "", gs_name)) %>% 
+  mutate(gs_name = gsub("_", " ", gs_name)) 
+```
+
+# Gene Set Enrichment analysis 
+## Pre vs 3hr post 
+```{r fig.height=7, fig.width=11, warning=FALSE}
+options(enrichment_force_universe = TRUE)
+
+preV3h_gseGO <- clusterProfiler::GSEA(
+  geneList = pre_3h_input$all_gene_list, 
+                     TERM2GENE = GO_BP,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d1_GO <- dotplot(preV3h_gseGO, 
+        showCategory=15, split=".sign", 
+        x = "NES",
+        label_format = 35,
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "GO BP Pathway Analysis of DE Genes (3hr post vs Pre exercise)") +
+        theme_bw(base_size = 18) +
+        theme(plot.title=element_text(hjust=0.5, size = 20, face = "bold"),
+              plot.subtitle=element_text(vjust=2, hjust=0.5, size = 18,face = "bold"),
+              axis.text.y = element_text(size = 11)) 
+
+preV3h_react <- clusterProfiler::GSEA(
+  geneList = pre_3h_input$all_gene_list, 
+                     TERM2GENE = reactome,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d1_react <- dotplot(preV3h_react, showCategory=15, split=".sign", 
+        label_format = 35,
+        x = "NES",
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "Reactome Pathway Analysis of DE Genes (3hr post vs Pre exercise)") +
+        theme_bw(base_size = 18) +
+        theme(plot.title=element_text(hjust=0.5, size = 20, face = "bold"),
+              plot.subtitle=element_text(vjust=2, hjust=0.5, size = 18,face = "bold"),
+              axis.text.y = element_text(size = 11)) 
+
+d1_GO
+d1_react
+```
+
+
+```{r eval=FALSE, fig.height=7, fig.width=11, warning=FALSE, include=FALSE}
+pdf(file = "figures/wholeMusc_mRNA_3hPostVpre_pathway.pdf",
+    width = 11, # The width of the plot in inches
+    height = 7) # The height of the plot in inches
+d1_GO
+d1_react
+dev.off()
+```
+
+## Pre vs Post 
+```{r fig.height=7, fig.width=8, warning=FALSE}
+options(enrichment_force_universe = TRUE)
+
+preVpost_gseGO <- clusterProfiler::GSEA(geneList = pre_post_input$all_gene_list, 
+                     TERM2GENE = GO_BP,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d2_GO <- dotplot(preVpost_gseGO, showCategory=15, split=".sign", 
+        label_format = 30,
+        x = "NES",
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "GO BP GSEA of DE Genes (Post vs Pre exercise)") +
+        theme_bw(base_size = 15) +
+        theme(plot.title=element_text(hjust=0.5, size = 15, face = "bold"),
+              axis.text.y = element_text(size = 12)) 
+
+preVpost_react <- clusterProfiler::GSEA(geneList = pre_post_input$all_gene_list, 
+                     TERM2GENE = reactome,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d2_react <- dotplot(preVpost_react, showCategory=15, split=".sign", 
+        label_format = 30,
+        x = "NES",
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "KEGG GSEA of DE Genes (Post vs Pre exercise)") +
+        theme_bw(base_size = 15) +
+        theme(plot.title=element_text(hjust=0.5, size = 15, face = "bold"),
+              axis.text.y = element_text(size = 12)) 
+
+d2_GO
+d2_react
+```
+
+```{r eval=FALSE, fig.height=10, fig.width=12, warning=FALSE, include=FALSE}
+pdf(file = "figures/wholeMusc_mRNA_preVpost_pathway.pdf",
+    width = 8, # The width of the plot in inches
+    height = 7) # The height of the plot in inches
+d2_GO
+d2_react
+dev.off()
+
+```
+
+
+## 3h Post vs Pre
+```{r fig.height=7, fig.width=11, warning=FALSE}
+options(enrichment_force_universe = TRUE)
+
+postV3hpost_gseGO <- clusterProfiler::GSEA(geneList = post_3h_input$all_gene_list, 
+                     TERM2GENE = GO_BP,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d3_GO <- dotplot(preVpost_gseGO, showCategory=10, split=".sign", 
+        label_format = 30,
+        x = "NES",
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "Gene Set Enrichment Analysis of DE Genes (Post vs Pre exercise)")+
+        theme_bw(base_size = 18) +
+        theme(plot.title=element_text(hjust=0.5, size = 20, face = "bold"),
+              plot.subtitle=element_text(vjust=2, hjust=0.5, size = 18,face = "bold"),
+              axis.text.y = element_text(size = 12)) 
+
+postV3hpost_react <- clusterProfiler::GSEA(geneList = post_3h_input$all_gene_list, 
+                     TERM2GENE = reactome,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+# plot results
+d3_react <- dotplot(postV3hpost_react, showCategory=10, split=".sign", 
+        label_format = 30,
+        x = "NES",
+        font.size = 5,) +
+        facet_grid(.~.sign) + 
+        labs(title = "Gene Set Enrichment Analysis of DE Genes (Post vs Pre exercise)")+
+        theme_bw(base_size = 18) +
+        theme(plot.title=element_text(hjust=0.5, size = 20, face = "bold"),
+              plot.subtitle=element_text(vjust=2, hjust=0.5, size = 18,face = "bold"),
+              axis.text.y = element_text(size = 12)) 
+d3_GO
+d3_react
+```
+
+
+```{r eval=FALSE, fig.height=10, fig.width=12, warning=FALSE, include=FALSE}
+pdf(file = "figures/wholeMusc_mRNA_preVpost_pathway.pdf",
+    width = 11, # The width of the plot in inches
+    height = 7) # The height of the plot in inches
+d3_GO
+d3_react
+dev.off()
+```
+
+# Compare gene lists to each other
+
+```{r fig.width=11, message=FALSE, warning=FALSE}
+# put all gene lists for each DE contrast in one list
+compare_list <- list(postVsPre = pre_post_input$all_gene_list,
+                     post3hrVsPre = pre_3h_input$all_gene_list)
+
+ck_GO <- compareCluster(geneClusters=compare_list, fun = "GSEA", 
+                     TERM2GENE = GO_BP,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+ck_react <- compareCluster(geneClusters=compare_list, fun = "GSEA", 
+                     TERM2GENE = reactome,
+                     pvalueCutoff = 0.05,
+                     minGSSize = 10, 
+                     maxGSSize = 800,
+                     eps = 0,
+                     by = "fgsea",
+                     verbose = FALSE)
+
+
+compare_GO <- dotplot(ck_GO, showCategory=10, split=".sign",
+        label_format = 40,
+        font.size = 10,) +
+        facet_grid(.~.sign) + 
+        labs(title = "GO BP pathway comparison 
+             for PreVsPost and PreVs3hPost DE Genes") +
+        theme(plot.title=element_text(hjust=0.5, size = 18, face = "bold"),
+              plot.subtitle=element_text(hjust=0.5, size = 15, face = "bold"))
+
+compare_react <- dotplot(ck_react, showCategory=10, split=".sign",
+        label_format = 40,
+        font.size = 10,) +
+        facet_grid(.~.sign) + 
+        labs(title = "Reactome pathway comparison 
+             for PreVsPost and PreVs3hPost DE Genes") +
+        theme(plot.title=element_text(hjust=0.5, size = 18, face = "bold"),
+              plot.subtitle=element_text(hjust=0.5, size = 15, face = "bold"))
+
+compare_GO 
+compare_react
+```
+
+Session Info
+```{r session info} 
+sessionInfo() 
+```
+

@@ -1,0 +1,293 @@
+---
+title: 'Skeletal Muscle DE Analysis'
+author: "MSoria"
+date: 2023-06-16
+output:
+  html_notebook:
+    theme: lumen
+    toc: yes
+    toc_float: true
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+---
+
+## Summary and background information
+The data used in this analysis is from an exercise intervention study in human participants. Muscle biopsies were taken at 3 time points for each participant: pre-exercise, post-exercise, and 3 hours post-exercise <br> <br>
+A whole muscle and a mitochondrial fraction is extracted from each biopsy. This analysis focuses on the differential expression of the whole muscle transcriptome.  
+
+## Load and install packages
+
+```{r include=FALSE}
+suppressPackageStartupMessages({c(
+  # packages from CRAN
+  if(!require("prettydoc")) install.packages("prettydoc"), library(prettydoc),
+  if(!require("readxl")) install.packages("readxl"), library(readxl),
+  if(!require("dplyr")) install.packages("dplyr"), library(dplyr),
+  if(!require("RColorBrewer")) install.packages("RColorBrewer"), library(RColorBrewer),
+  if(!require("circlize")) install.packages("circlize"), library(circlize),
+  library(ggplot2),
+  library(RNAseqQC),
+  # packages from Bioconductor
+  # run the installation code when needed
+  # if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+  #   BiocManager::install(c("DESeq2", "ComplexHeatmap", "EnhancedVolcano", "org.Hs.eg.db")),
+  library(DESeq2),
+  library(ComplexHeatmap),
+  library(EnhancedVolcano),
+  library(cowplot),
+  library(PCAtools),
+  library(reshape2),
+  library(tidyverse)
+  )})
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("DESeq2")
+  
+# load self-authored functions 
+source("functions.R")
+
+set.seed(42)
+```
+
+***
+
+## Load cts and col data
+```{r}
+cts <- readRDS("rds/cts_proteinCodingOnly.rds")
+coldata <- readRDS("rds/bulkRNA_muscle_coldata.rds")
+
+all(rownames(coldata) %in% colnames(cts)) 
+all(rownames(coldata) == colnames(cts)) 
+```
+
+## Differential expression analysis
+The following differential expression analysis is conducted using the DESeq2 package
+```{r DEseq2,echo=T, results='hide', message=FALSE}
+#set up deseq2 object
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Participant_ID + condition)
+
+dds$condition <- relevel(dds$condition, ref = "PRE") 
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+dds <- DESeq(dds) #run deseq2
+
+# Jess's orig matrix has 15,198 rows
+cat("Before filtering - total gene IDs: ", length(rownames(cts)), "\n",
+    "After filtering - total gene IDs: ", dim(dds)[1])
+```
+
+#### Pull out DEseq2 normalised read counts
+
+```{r deseq2_norm, message=FALSE, warning=FALSE, results='hide'}
+dds <- estimateSizeFactors(dds)
+normcounts <- counts(dds, normalized=TRUE)
+```
+
+### Extract all possible contrasts 
+
+```{r}
+# extract contrasts
+hr3POST_vs_PRE <- results(dds, contrast=c("condition","3HPOST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+POST_vs_PRE <- results(dds, contrast=c("condition","POST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+hr3POST_vs_POST <- results(dds, contrast=c("condition","3HPOST","POST")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+# store all contrasts in a list 
+ddsResults_list <- list(
+  "condition_3HPOST_vs_PRE" = hr3POST_vs_PRE,
+  "condition_POST_vs_PRE" = POST_vs_PRE,
+  "condition_3HPOST_vs_POST" = hr3POST_vs_POST
+)
+
+ddsResults_list <- diff_expressed(ddsResults_list, padjust = 0.05, L2FC = 1)
+names(ddsResults_list)
+
+saveRDS(ddsResults_list, "rds/ddsResults_wholeMusc.rds")
+
+```
+
+## Visualisations
+
+Apply variance stabilising transformation to the DESeq data
+```{r fig.width=10, fig.height=6}
+# apply variance stabilising transformation to the DESeq data
+# this normalisation is required for calculations involving distances (heatmaps, clustering, etc.)
+vsd <- vst(dds, blind=T)
+
+#plotPCA(vsd, intgroup=c("condition"))
+pca <- plot_pca(vsd, PC_x = 1, PC_y = 2, color_by = "condition", point_rel_size = 4) 
+p <- pca(assay(vsd))
+
+s <- screeplot(p, axisLabSize = 18, titleLabSize = 22) 
+s
+
+# pdf(file = "figures/wholeMusc_mRNA_pca.pdf",
+#     width = 10, # The width of the plot in inches
+#     height = 6) # The height of the plot in inches
+# pca
+# s
+# dev.off()
+
+```
+
+```{r }
+# add gene names from ENSEMBL Ids
+cts_trns2gene <- readRDS("rds/transcript2gene_biotype.rds")
+data_genename <- cts_trns2gene[2:3] %>% 
+  distinct()
+names(data_genename) <- c("ENSEMBL", "SYMBOL")
+
+de_genes <- ddsResults_list$condition_3HPOST_vs_PRE %>%
+                            rownames_to_column(var = "ENSEMBL") %>% 
+  filter(padj < 0.05) %>% 
+  filter(abs(log2FoldChange) >= 1)
+
+signif_genes <- de_genes %>% 
+  left_join(data_genename, by = 'ENSEMBL') %>%
+  filter(!is.na(padj)) %>% 
+#  filter(!SYMBOL == "") %>% 
+   mutate(SYMBOL = ifelse(is.na(SYMBOL) |
+                                    SYMBOL == "",
+                                  paste0(ENSEMBL),
+                                  paste0(SYMBOL))) %>%
+  # filter most significant ensembl gene / isoform mapping to the same gene symbol
+  group_by(SYMBOL) %>%
+  slice_min(order_by = padj, n = 1, with_ties = FALSE) %>%  
+  ungroup() %>% 
+  column_to_rownames(var = "ENSEMBL") %>% 
+  as.data.frame() 
+signif_genes <- signif_genes[order(signif_genes$padj, decreasing = F),]
+                                  
+```
+
+### Heatmap
+This heatmap shows the changes in gene expression across all time points using condition = 3HRPOST vs PRE. The top 30 up-regulated and down-regulated genes are filtered according to pvalue < 0.05 and |log2 fold change| > 1
+```{r}
+mat <- assay(vsd)[rownames(signif_genes),]
+mat_z <- t(apply(mat, 1, scale))
+colnames(mat_z) <- colnames(mat)
+
+# select the top and bottom genes and store log2foldchange and baseMean values
+numkeep <- 70
+rowskeep <- c(seq(1:numkeep))
+
+# set a pre, post, and 3hour post groupings
+sampling_group <- c(rep(c("Pre", "Post", "3hrPost"), times = 3),
+                    c("Post", "3hrPost"), 
+                    rep(c("Pre", "Post", "3hrPost"), times = 4),
+                    c("Post", "3hrPost"), 
+                    c("Pre", "Post"),
+                    rep(c("Pre", "Post", "3hrPost"), times = 2))
+sampling_group_col = c("Pre" = 5, "Post" = 4, "3hrPost" = 6)
+
+dend1 = cluster_within_group(mat_z, sampling_group)
+
+```
+
+Create the heatmaps
+```{r fig.width=14.22, fig.height=15}
+
+h1 <- Heatmap(mat_z[rowskeep,], 
+              column_title_gp = gpar(fontsize = 23),
+              cluster_rows = T, # cluster only columns to compare samples
+              column_labels = colnames(mat_z), 
+              row_labels = signif_genes$SYMBOL[rowskeep], 
+              name="Z-score", 
+              column_names_rot = 45,
+              cluster_columns = dend1, 
+              column_split = 3,
+              top_annotation = HeatmapAnnotation(
+                Condition = sampling_group,  
+                col = list(Condition = sampling_group_col)))
+
+draw(h1, padding = unit(c(2, 10, 2, 2), "mm"))
+
+```
+
+
+```{r eval=FALSE, fig.height=15, fig.width=14.22, include=FALSE}
+pdf(file = "figures/wholeMusc_mRNA_hmap.pdf",
+    width = 14.22, # The width of the plot in inches
+    height = 15) # The height of the plot in inches
+draw(h1, padding = unit(c(2, 10, 2, 2), "mm"))
+dev.off()
+```
+
+### Volcano plots
+```{r fig.width=14.22, fig.height=15}
+plots <- list()
+for (i in 1:length(ddsResults_list)) {
+   
+  upGenes <- table(ddsResults_list[[i]]$diffexpressed)["UP"]
+  downGenes <- table(ddsResults_list[[i]]$diffexpressed)["DOWN"]
+  name1 <- gsub("_", " ", names(ddsResults_list[i]))
+  name <- gsub("condition", "", name1)
+     
+    p <- EnhancedVolcano(ddsResults_list[[i]], x="log2FoldChange", y="padj", lab = NA, 
+                pCutoff = 0.05, FCcutoff = 1, title = name, pointSize = 4,
+                subtitle = paste0("Up-regulated = ", upGenes, " and Down-regulated = ", downGenes), 
+                gridlines.major = FALSE, gridlines.minor = FALSE, axisLabSize = 20, titleLabSize = 20, subtitleLabSize = 18,
+                captionLabSize = 0, legendLabSize = 15, legendIconSize = 8, col = c("grey30", "royalblue", "forestgreen", "red2"))
+  
+  plots[[i]] <- p
+}
+plot_grid(plotlist = plots, ncol = 2, labels = LETTERS[1:length(plots)], label_size = 18)
+```
+
+
+```{r eval=FALSE, fig.height=15, fig.width=14.22, include=FALSE}
+pdf(file = "figures/wholeMusc_mRNA_volcanoPlots.pdf",
+    width = 10, # The width of the plot in inches
+    height = 10) # The height of the plot in inches
+plots[1:3]
+dev.off()
+```
+
+### Summary of up-regulated and down-regulated genes
+```{r }
+diffexpr_summary <- list()
+
+for (i in 1:length(ddsResults_list)) {
+  
+  upGenes <- table(ddsResults_list[[i]]$diffexpressed)["UP"]
+  downGenes <- table(ddsResults_list[[i]]$diffexpressed)["DOWN"]
+  name <- gsub("_", " ", names(ddsResults_list[i]))
+  name2 <- gsub("condition", "", name)
+  
+  diffexpr_summary[[paste0(i)]]$Stage <- name2
+  diffexpr_summary[[paste0(i)]]$Up <- upGenes
+  diffexpr_summary[[paste0(i)]]$Down <- downGenes
+}
+
+diffexpr_summaryDF <- do.call(rbind.data.frame, diffexpr_summary) %>%
+  as.data.frame(.)
+diffexpr_summaryDF
+```
+
+
+```{r eval=FALSE, include=FALSE}
+write.csv(diffexpr_summaryDF, "outData/wholeMusc_mRNA_DEsummary.csv")
+write.csv(ddsResults_list$condition_3HPOST_vs_PRE, "outData/wholeMusc_mRNA_DE_3HPOSTvPRE.csv")
+write.csv(ddsResults_list$condition_POST_vs_PRE, "outData/wholeMusc_mRNA_DE_POSTvPRE.csv")
+write.csv(ddsResults_list$condition_3HPOST_vs_POST, "outData/wholeMusc_mRNA_DE_3HPOSTvPOST.csv")
+```
+
+
+Session Info
+```{r session info} 
+sessionInfo() 
+```
+

@@ -1,0 +1,240 @@
+---
+title: "Human whole muscle vs mitochondrial miRNA Analysis"
+author: "MSoria" 
+date: 2025-07-21
+output:
+  html_notebook:
+    theme: lumen
+    toc: yes
+    toc_float: true
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+---
+
+# Load and install packages
+
+```{r include=FALSE}
+suppressPackageStartupMessages({c(
+  # packages from CRAN
+  if(!require("prettydoc")) install.packages("prettydoc"), library(prettydoc),
+  if(!require("dplyr")) install.packages("dplyr"), library(dplyr),
+  if(!require("RColorBrewer")) install.packages("RColorBrewer"), library(RColorBrewer),
+  if(!require("circlize")) install.packages("circlize"), library(circlize),
+  library(ggplot2),
+  library(RNAseqQC),
+  library(DESeq2),
+  library(edgeR),
+  library(ComplexHeatmap),
+  library(EnhancedVolcano),
+  library(PCAtools),
+  library(fgsea),
+  library(msigdbr),
+  library(tidyverse),
+  library(clusterProfiler),
+  library(enrichplot)
+  )})
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("DESeq2")
+  
+# load self-authored functions 
+source("functions.R")
+
+set.seed(42)
+```
+
+***
+# Load data 
+```{r}
+# miRNAdatasets = readRDS("rds/miRNAdatasets.rds")
+miRNAdatasets = readRDS("rds/miRNAdatasets_filtered_hmtb09.rds")
+
+# muscle
+muscle.cts <- miRNAdatasets$muscle_miRNA_cts
+muscle.coldata <- miRNAdatasets$muscle_miRNA_coldata
+all(muscle.coldata$sampleid == colnames(muscle.cts))
+
+# mito
+mito.cts <- miRNAdatasets$mito_miRNA_cts
+mito.coldata <- miRNAdatasets$mito_miRNA_coldata
+all(mito.coldata$sampleid == colnames(mito.cts))
+
+rm(miRNAdatasets)
+```
+
+## Differential expression anlysis for muscle
+```{r}
+#set up deseq2 object
+dds <- DESeqDataSetFromMatrix(countData = muscle.cts,
+                              colData = muscle.coldata,
+                              design = ~ Participant_ID + condition)
+dds$condition <- relevel(dds$condition, ref = "PRE") 
+
+keep <- rowSums(counts(dds)) >=10 
+dds <- dds[keep,]
+
+dds <- DESeq(dds) #run deseq2
+
+hr3POST_vs_PRE <- results(dds, contrast=c("condition","3HPOST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+POST_vs_PRE <- results(dds, contrast=c("condition","POST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+hr3POST_vs_POST <- results(dds, contrast=c("condition","3HPOST","POST")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+# store all contrasts in a list 
+ddsResults_musc_miR <- list(
+  "condition_3HPOST_vs_PRE" = hr3POST_vs_PRE,
+  "condition_POST_vs_PRE" = POST_vs_PRE,
+  "condition_3HPOST_vs_POST" = hr3POST_vs_POST
+)
+
+ddsResults_musc_miR <- diff_expressed(ddsResults_musc_miR, padjust = 0.05, L2FC = 1)
+names(ddsResults_musc_miR)
+
+saveRDS(ddsResults_musc_miR, "rds/ddsResults_musc_miR.rds")
+```
+
+
+```{r}
+# normalise for PCA plot: use varianceStabilizingTransformation() for nrow(dds) < 1000
+muscle.vst <- varianceStabilizingTransformation(dds, blind=T) 
+
+# write.csv(ddsResults_musc_miR$condition_3HPOST_vs_PRE,
+#           file="outData/miRNA_musc_DE_3HPOSTvsPRE.csv", row.names=TRUE)
+# write.csv(ddsResults_musc_miR$condition_POST_vs_PRE,
+#           file="outData/miRNA_musc_DE_POSTvPRE.csv", row.names=TRUE)
+# write.csv(ddsResults_musc_miR$condition_3HPOST_vs_POST,
+#           file="outData/miRNA_musc_DE_3HPOSTvsPOST.csv", row.names=TRUE)
+```
+
+## Differential expression anlysis for mitochondria
+```{r}
+#set up deseq2 object
+dds <- DESeqDataSetFromMatrix(countData = mito.cts,
+                              colData = mito.coldata,
+                              design = ~ Participant_ID + condition)
+dds$condition <- relevel(dds$condition, ref = "PRE") 
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+dds <- DESeq(dds) #run deseq2
+
+hr3POST_vs_PRE <- results(dds, contrast=c("condition","3HPOST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+POST_vs_PRE <- results(dds, contrast=c("condition","POST","PRE")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+hr3POST_vs_POST <- results(dds, contrast=c("condition","3HPOST","POST")) %>%
+  .[order(.$log2FoldChange, decreasing = TRUE),] %>%
+      as.data.frame(.)
+
+# store all contrasts in a list 
+ddsResults_mito_miR <- list(
+  "condition_3HPOST_vs_PRE" = hr3POST_vs_PRE,
+  "condition_POST_vs_PRE" = POST_vs_PRE,
+  "condition_3HPOST_vs_POST" = hr3POST_vs_POST
+)
+
+ddsResults_mito_miR <- diff_expressed(ddsResults_mito_miR, padjust = 0.05, L2FC = 1)
+
+saveRDS(ddsResults_mito_miR, "rds/ddsResults_mito_miR.rds")
+```
+
+
+```{r}
+mito.vst <- varianceStabilizingTransformation(dds, blind=T) 
+
+# write.csv(ddsResults_mito_miR$condition_3HPOST_vs_PRE,
+#           file="outData/miRNA_mito_DE_3HPOSTvsPRE.csv", row.names=TRUE)
+# write.csv(ddsResults_mito_miR$condition_POST_vs_PRE,
+#           file="outData/miRNA_mito_DE_POSTvPRE.csv", row.names=TRUE)
+# write.csv(ddsResults_mito_miR$condition_3HPOST_vs_POST,
+#           file="outData/miRNA_mito_DE_3HPOSTvsPOST.csv", row.names=TRUE)
+```
+
+# Visualisations
+## Heatmaps - muscle miRNA
+```{r fig.width=15, fig.height=10}
+# muscle
+signif.muscle <- ddsResults_musc_miR$condition_3HPOST_vs_PRE %>%
+  # filter(padj < 0.05) 
+  subset(., pvalue < 0.05)
+
+count_mat <- z_score(muscle.vst, signif.muscle)
+count_mat
+
+hmap_name <- "Muscle miRNAs by time point (pvalue < 0.05"
+hmap.muscle <- hmap(34, signif.muscle, count_mat, hmap_name)
+
+# grouped hmap
+sampling_group <- muscle.coldata$condition
+sampling_group_col <- c("PRE" = "#E41A1C", "POST" = "#377EB8", "3HPOST" = "#4DAF4A")
+hmap_name <- "Muscle miRNAs"
+hmap.muscle.g <- hmap_colGrouped(34, signif.muscle, count_mat,
+                               hmap_name, sampling_group, sampling_group_col)
+
+hmap.muscle
+draw(hmap.muscle.g, padding = unit(c(2, 10, 2, 2), "mm"))
+```
+
+## Heatmaps - mito miRNA 
+```{r fig.width=15, fig.height=5}
+# mito
+signif.mito <- ddsResults_mito_miR$condition_3HPOST_vs_PRE %>%
+  subset(., pvalue < 0.05)
+  # filter(padj < 0.05)
+
+count_mat <- z_score(mito.vst, signif.mito)
+
+hmap_name <- "Mitochondrial miRNAs (pvalue < 0.05"
+hmap.mito <- hmap(12, signif.mito, count_mat, hmap_name)
+
+# grouped hmap
+sampling_group <- mito.coldata$condition
+sampling_group_col <- c("PRE" = "#E41A1C", "POST" = "#377EB8", "3HPOST" = "#4DAF4A")
+hmap_name <- "Mitochondrial miRNAs by time point"
+hmap.mito.g <- hmap_colGrouped(12, signif.mito, count_mat,
+                               hmap_name, sampling_group, sampling_group_col)
+
+hmap.mito
+draw(hmap.mito.g, padding = unit(c(2, 10, 2, 2), "mm"))
+
+```
+
+
+```{r eval=FALSE, fig.height=12, fig.width=15, include=FALSE}
+pdf(file = "figures/muscle_miRNAs_hmap_rawPVAL.pdf",   
+    width = 15, # The width of the plot in inches
+    height = 10) # The height of the plot in inches
+# hmap.muscle
+# hmap.mito
+draw(hmap.muscle.g, padding = unit(c(2, 10, 2, 2), "mm"))
+dev.off()
+```
+
+```{r eval=FALSE, fig.height=12, fig.width=15, include=FALSE}
+pdf(file = "figures/mito_miRNAs_hmap_rawPVAL.pdf",   
+    width = 15, # The width of the plot in inches
+    height = 5) # The height of the plot in inches
+# hmap.muscle
+# hmap.mito
+draw(hmap.mito.g, padding = unit(c(2, 10, 2, 2), "mm"))
+dev.off()
+```
+
+Session Info
+```{r session info}
+sessionInfo()
+```

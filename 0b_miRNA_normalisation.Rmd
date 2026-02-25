@@ -1,0 +1,227 @@
+---
+title: "Comparison of normalisation methods"
+author: "Megan Soria"
+date: 2025-07-21
+output:
+  html_notebook:
+    theme: lumen
+    toc: yes
+    toc_float: true
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+---
+
+This notebook aims to compare normalisation methods for micro-RNAs (miRNAs) extracted from whole skeletal muscle and mitrochodrial fractions from participants of an excercise experiment. Each sample was taken pre, post, and 3hours post exercise. 
+
+```{r include=FALSE}
+# load libraries
+suppressPackageStartupMessages({c(
+library(RUVSeq),
+library(edgeR),
+library(DESeq2),
+library(tidyverse),
+library(readxl),
+library(RColorBrewer),
+library(RNAseqQC),
+library(ggplot2),
+library(VennDiagram)
+)})
+
+set.seed(42)
+```
+
+# Load counts data and filter out zero counts
+## muscle miRNA
+```{r}
+muscle_miRNA_cts <- read.csv("data/MUSC_miRNA_RAW_counts.csv", sep=",", row.names = 1) 
+names(muscle_miRNA_cts) <- gsub("_.*", "", names(muscle_miRNA_cts))
+
+muscle_miRNA_coldata <- data.frame("sample_ID" = colnames(muscle_miRNA_cts)) %>% 
+  mutate(cond = gsub(".*\\.", "", .$sample_ID)) %>% 
+  mutate(condition = if_else(cond == "1", "PRE",
+                    if_else(cond == "2", "POST", "3HPOST"))) %>% 
+  mutate(Participant_ID = gsub("\\..*", "", .$sample_ID))
+
+muscle_miRNA_coldata$condition <- factor(muscle_miRNA_coldata$condition,
+                                         levels = c("PRE", "POST", "3HPOST"))
+muscle_miRNA_coldata$sample_ID <- factor(muscle_miRNA_coldata$sample_ID)
+muscle_miRNA_coldata$Participant_ID <- factor(muscle_miRNA_coldata$Participant_ID)
+rownames(muscle_miRNA_coldata) <- muscle_miRNA_coldata$sample_ID
+
+all(rownames(muscle_miRNA_coldata) == colnames(muscle_miRNA_cts)) #check these both come back as TRUE
+
+saveRDS(muscle_miRNA_coldata, "rds/muscle_miRNA_coldata.rds")
+saveRDS(muscle_miRNA_cts, "rds/muscle_miRNA_cts.rds")
+
+```
+
+## mito miRNA
+```{r}
+mito_cts <- read.csv("data/MITO_miRNA_RAW_counts.csv", sep=",", row.names = 1) 
+names(mito_cts) <- gsub("_.*", "", names(mito_cts)) 
+
+# rename hmta.12.2.2 to hmta.12.2
+names(mito_cts) <- gsub("^((?:[^.]*\\.){2}[^.]*)\\..*$", "\\1", names(mito_cts))
+
+mito_cts <- mito_cts[, order(names(mito_cts))]
+
+mito_coldata <- data.frame("sample_ID" = colnames(mito_cts)) %>% 
+  mutate(cond = gsub(".*\\.", "", .$sample_ID)) %>% 
+  mutate(condition = if_else(cond == "1", "PRE",
+                    if_else(cond == "2", "POST", "3HPOST"))) %>% 
+  mutate(Participant_ID = gsub("(\\w+)\\.(\\d+)\\.\\d+", "\\1\\2", .$sample_ID)) 
+  
+
+mito_coldata$condition <- factor(mito_coldata$condition,
+                                 levels = c("PRE", "POST", "3HPOST"))
+mito_coldata$sample_ID <- factor(mito_coldata$sample_ID)
+mito_coldata$Participant_ID <- factor(mito_coldata$Participant_ID)
+rownames(mito_coldata) <- mito_coldata$sample_ID
+
+all(rownames(mito_coldata) == colnames(mito_cts)) #check these both come back as TRUE
+```
+
+## Remove hmtb09.1 and hmtb09.3 samples (duplicates of the hmta09)
+```{r}
+mito_coldata <- mito_coldata %>% 
+  filter(!Participant_ID == "hmtb09")
+
+mito_cts <- mito_cts %>% 
+  select(mito_coldata$sample_ID)
+
+all(rownames(mito_coldata) == colnames(mito_cts))
+```
+
+
+```{r}
+datalist = list(mito_miRNA_coldata = mito_coldata, 
+                mito_miRNA_cts = mito_cts, 
+                muscle_miRNA_coldata = muscle_miRNA_coldata, 
+                muscle_miRNA_cts = muscle_miRNA_cts)
+saveRDS(datalist, "rds/miRNAdatasets_filtered_hmtb09.rds")
+```
+
+# PCA Plot and outlier samples for muscle miRNA data
+```{r fig.width=9, fig.height=5}
+# detect outlier samples - hierarchical clustering
+htree <- hclust(dist(t(muscle_miRNA_cts)), method = "average")
+groups <- cutree(htree, k=3) # cut tree into clusters
+
+plot(htree, labels(groups))
+# draw dendogram with red borders around the clusters
+rect.hclust(htree, k=3, border="red")
+```
+
+## Uncorrected PCA
+```{r fig.width=9, fig.height=5}
+# PCA
+# use mito.coldata.nf and mito.cts for unfiltered data (with all samples)
+dds_pca <- DESeqDataSetFromMatrix(countData = muscle_miRNA_cts,
+                              colData = muscle_miRNA_coldata,
+                              design = ~ Participant_ID + condition)
+keep <- rowSums(counts(dds_pca)) >= 10
+dds_pca <- dds_pca[keep,]
+
+dds_pca.vsd <- varianceStabilizingTransformation(dds_pca)  
+
+plot_pca(dds_pca.vsd, PC_x = 1, PC_y = 2, color_by = "condition", 
+         point_rel_size = 5)
+```
+
+## Corrected PCA (batch = Participant_ID)
+```{r fig.width=9, fig.height=5}
+library(limma)
+mat_corrected <- removeBatchEffect(assay(dds_pca.vsd), batch = muscle_miRNA_coldata$Participant_ID)
+# saveRDS(mat_corrected, "rds/mat_corrected_combinedALL.rds")
+
+assay(dds_pca.vsd) <- mat_corrected
+
+p <- plot_pca(dds_pca.vsd, PC_x = 1, PC_y = 2, color_by = "condition",
+         point_rel_size = 5, show_plot = F) 
+
+cbPalette <- c("PRE" = "#00048b", "POST" = "#2463ff", "3HPOST" = "#088F8F")
+
+p_plot <- p$plot + 
+  scale_color_manual("Condition", values = cbPalette) +
+  geom_hline(aes(yintercept = 0), linetype = 2, color = "black") + 
+  geom_vline(aes(xintercept = 0), linetype = 2, color = "black") +
+  labs(title = "Corrected Muscle miRNA PCA Plot") +
+  theme_minimal(base_size = 15) +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15))
+
+p_plot
+```
+
+# PCA Plot and outlier samples for mitochondrial miRNA data
+```{r fig.width=9, fig.height=5}
+# detect outlier samples - hierarchical clustering
+htree <- hclust(dist(t(mito_cts)), method = "average")
+groups <- cutree(htree, k=3) # cut tree into clusters
+
+plot(htree, labels(groups))
+# draw dendogram with red borders around the clusters
+rect.hclust(htree, k=3, border="red")
+```
+
+## Uncorrected PCA
+```{r fig.width=9, fig.height=9}
+# PCA
+# use mito.coldata.nf and mito.cts for unfiltered data (with all samples)
+dds_pca <- DESeqDataSetFromMatrix(countData = mito_cts,
+                              colData = mito_coldata,
+                              design = ~ Participant_ID + condition)
+keep <- rowSums(counts(dds_pca)) >= 10
+dds_pca <- dds_pca[keep,]
+
+dds_pca.vsd <- varianceStabilizingTransformation(dds_pca, blind=T)  
+
+p <- plot_pca(dds_pca.vsd, PC_x = 1, PC_y = 2, color_by = "condition",
+         point_rel_size = 5, show_plot = F) 
+
+cbPalette <- c("PRE" = "#00048b", "POST" = "#2463ff", "3HPOST" = "#088F8F")
+
+p_plot <- p$plot + 
+  scale_color_manual("Condition", values = cbPalette) +
+  geom_hline(aes(yintercept = 0), linetype = 2, color = "black") + 
+  geom_vline(aes(xintercept = 0), linetype = 2, color = "black") +
+  #geom_text(aes(label = sample_ID), vjust = -0.5) +
+  labs(title = "Uncorrected Mitochondrial miRNA PCA Plot") +
+  theme_minimal(base_size = 15) +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15))
+
+p_plot
+
+```
+## Corrected PCA (batch = Participant_ID)
+```{r fig.width=9, fig.height=5}
+library(limma)
+mat_corrected <- removeBatchEffect(assay(dds_pca.vsd), batch = mito_coldata$Participant_ID)
+
+assay(dds_pca.vsd) <- mat_corrected
+
+p <- plot_pca(dds_pca.vsd, PC_x = 1, PC_y = 2, color_by = "condition",
+         point_rel_size = 5, show_plot = F) 
+
+cbPalette <- c("PRE" = "#00048b", "POST" = "#2463ff", "3HPOST" = "#088F8F")
+
+p_plot <- p$plot + 
+  scale_color_manual("Condition", values = cbPalette) +
+  geom_hline(aes(yintercept = 0), linetype = 2, color = "black") + 
+  geom_vline(aes(xintercept = 0), linetype = 2, color = "black") +
+  #geom_text(aes(label = sample_ID), vjust = -0.5) +
+  labs(title = "Corrected Mitochondrial miRNA PCA Plot") +
+  theme_minimal(base_size = 15) +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15))
+
+p_plot
+```
+
+# Session Info
+```{r session info}
+sessionInfo()
+```
+

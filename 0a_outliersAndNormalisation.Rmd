@@ -1,0 +1,230 @@
+---
+title: 'Outliers and Normalisation: mito, miRNA, bulk RNA for skeletal musc'
+author: "MSoria"
+date: "2025-21-Jul"
+output:
+  html_document:
+    toc: yes
+  html_notebook:
+    theme: lumen
+    toc: yes
+---
+
+# Load Libraries
+```{r load library, include=FALSE}
+
+# Installation of some useful packages
+suppressPackageStartupMessages({c(
+  if(!isTRUE(require("prettydoc"))){install.packages("prettydoc")},
+  if(!isTRUE(require("readxl"))){install.packages("readxl")},
+  library(prettydoc), # htm template
+  library(readxl), # reads excel files
+  library(reshape2), # for acast() - transform from long to short format data
+  library(tidyverse), library(RNAseqQC),
+  library(RUVSeq), library(edgeR), library(DESeq2),
+  library(dplyr), library(tidyr), library(ComplexHeatmap), 
+  library(RColorBrewer), library(circlize),
+  library(ggplot2), library(ggrepel), library(PCAtools),
+  library(EnhancedVolcano), library(cowplot),
+  library(kableExtra), 
+  library(knitr),
+  library(biomaRt)
+  )})
+
+# Load custom functions 
+source("functions.R")
+
+set.seed(42)
+```
+
+# Load and transform data
+Load counts and biological data from the "data" folder
+```{r}
+# load counts data
+# ctsToDf is a custom function used to transform longform cts table to short form
+cts_raw <- ctsToDf("data/3col.tsv") 
+colnames(cts_raw) <- gsub("_.*", "", colnames(cts_raw)) 
+y <- length(rownames(cts_raw))
+
+head(cts_raw)
+```
+
+## Create transcript to gene table via GTF file
+Create folder named "rds" first
+```{r}
+gtf2transcript2gene <- function(url, destfile_gtf, destfile_rds){
+  library(rtracklayer)
+  if(!file.exists(destfile_gtf))(download.file(url, destfile_gtf))
+  gtf <- import(destfile_gtf)  
+  colnames(mcols(gtf))
+  
+  transcript2gene <- gtf %>%
+    mcols() %>%
+    as.data.frame() %>%
+    dplyr::select(transcript_id, gene_id, gene_name, gene_biotype) %>%
+    distinct()
+
+  saveRDS(transcript2gene, destfile_rds)
+  
+  return(transcript2gene)
+}
+
+url <- "https://ftp.ensembl.org/pub/release-114/gtf/homo_sapiens/Homo_sapiens.GRCh38.114.gtf.gz"
+destfile_gtf <- "data/Homo_sapiens.GRCh38.114.gtf.gz"
+destfile_rds <- "rds/transcript2gene_biotype.rds"
+gtf2transcript2gene(url, destfile_gtf, destfile_rds)
+
+transcript2gene_biotype <- readRDS("rds/transcript2gene_biotype.rds")
+
+```
+
+## Map transcript ID to gene ID
+```{r eval=FALSE, include=FALSE}
+cts_trns2gene <- cts_raw %>%
+  tibble::rownames_to_column(., "ensembl_transcript_id_version") %>%
+  mutate(ensembl_transcript_id_version = gsub("\\..*","", .$ensembl_transcript_id_version)) %>%
+  left_join(., transcript2gene_biotype, by = c("ensembl_transcript_id_version"="transcript_id"))%>% 
+  filter(gene_biotype == "protein_coding") %>% 
+  as.data.frame()
+
+# check that all transcript IDs have gene IDs
+cts_trns2gene %>%
+    filter(str_detect(ensembl_transcript_id_version, "_")) %>%
+    nrow() # this should be zero
+
+# group by geneID, aggregate counts, and attach gene name
+cts <- cts_trns2gene %>% 
+  mutate(gene_transcript = ifelse(is.na(gene_id) | 
+                                    gene_id == "" | 
+                                    gene_id == "_", 
+                                  paste0("--", ensembl_transcript_id_version), 
+                                  paste0(gene_id))) %>% 
+  mutate(gene_transcript = gsub("\\..*","", .$gene_transcript)) %>%
+  dplyr::select(-c(ensembl_transcript_id_version, 
+                   gene_id, gene_name, gene_biotype)) %>% 
+  group_by(gene_transcript) %>% 
+  summarise_all(., sum) %>%
+  tibble::column_to_rownames(., var = "gene_transcript") %>%
+  as.data.frame()
+
+saveRDS(cts, "rds/cts_proteinCodingOnly.rds")
+```
+
+## Load phenotype data
+```{r}
+coldata <- read.csv("data/silver_hskm condition_by group.csv", sep = ",", header = TRUE) %>% 
+  arrange(sampleid) %>% 
+  mutate(Participant_ID = gsub("-[0-9]+$", "", .$sampleid))
+
+rownames(coldata) <- coldata$sampleid
+coldata$condition <- factor(coldata$condition,
+                            levels = c("PRE","POST", "3HPOST"))
+coldata$sampleid <- factor(coldata$sampleid)
+coldata$Participant_ID <- factor(coldata$Participant_ID)
+
+saveRDS(coldata, "rds/bulkRNA_muscle_coldata.rds")
+
+all(rownames(coldata) %in% colnames(cts)) 
+all(rownames(coldata) == colnames(cts)) 
+
+cat(" Number of transcript IDs: ", y,"\n",
+    "Number of protein coding gene IDs: ", length(rownames(cts)))
+
+```
+
+# Detect outlier samples via unsupervised clustering
+```{r fig.width=12}
+# detect outlier samples - hierarchical clustering
+htree <- hclust(dist(t(cts)), method = "average")
+groups <- cutree(htree, k=3) # cut tree into clusters
+
+plot(htree, labels(groups))
+# draw dendogram with red borders around the clusters
+rect.hclust(htree, k=3, border="red")
+```
+
+
+# Comparison of normalisation methods 
+The comparison is made using Relative log expression (RLE) plots (Gandolfo and Speed, 2018).
+The normalisation methods compared are: Upper quantile normalisation, Trimmed mean of m-values (TMM - edgeR), and Variance Stabilising Transformation (VST - DESeq2).
+
+## Normalisation for the entire data
+This comparison is used with the dataset **including** all the samples.
+```{r fig.width=11, fig.height=8}
+cts.comp.norm <- cts
+p_dat.comp.norm <- coldata %>% 
+  mutate(RowName = rownames(.))
+
+group <- p_dat.comp.norm$Type
+# normalise via TMM (edgeR)
+y <- DGEList(counts = cts.comp.norm, group=group)
+keep.exprs <- filterByExpr(y, group=group)
+d <- y[keep.exprs,, keep.lib.sizes=FALSE]
+
+d <- calcNormFactors(d, method="TMM") # get tmm from edgeR
+d = estimateCommonDisp(d, verbose=TRUE)
+tmm_human <- d$pseudo.counts
+
+# VSD from DESEq
+dds <- DESeqDataSetFromMatrix(countData = cts.comp.norm,
+                              colData = p_dat.comp.norm,
+                              design = ~ condition)
+
+keep <- rowMeans(counts(dds)) >= 10 
+dds <- dds[keep,]
+human.vsd <- vst(dds, blind=T) 
+
+dds <- estimateSizeFactors(dds)
+human.deseq <- counts(dds, normalized=TRUE)
+
+
+set1 <- newSeqExpressionSet(as.matrix(cts.comp.norm),
+                            phenoData = AnnotatedDataFrame(data=p_dat.comp.norm, 
+                            varMetadata = data.frame(labelDescription=c(names(p_dat.comp.norm)))))
+# upper quantile normalisation
+set_upper <- betweenLaneNormalization(set1, which="upper")
+
+set_tmm <- newSeqExpressionSet(as.matrix(tmm_human),
+                            phenoData = AnnotatedDataFrame(data=p_dat.comp.norm, 
+                            varMetadata = data.frame(labelDescription=c(names(p_dat.comp.norm)))))
+
+set_vsd <- newSeqExpressionSet(as.matrix(round(assay(human.vsd))),
+                            phenoData = AnnotatedDataFrame(data=p_dat.comp.norm, 
+                            varMetadata = data.frame(labelDescription=c(names(p_dat.comp.norm)))))
+
+set_mmDeseq <- newSeqExpressionSet(as.matrix(round(human.deseq)),
+                            phenoData = AnnotatedDataFrame(data=p_dat.comp.norm, 
+                            varMetadata = data.frame(labelDescription=c(names(p_dat.comp.norm)))))
+
+x <- c(rep(1:30, each=2))
+colors <- brewer.pal(9, "Set1")
+colors <- colorRampPalette(colors)(60)
+plotRLE(set1, outline=FALSE, ylim=c(-1.2, 1.9), col=colors[x], xlab="No Normalisation", xaxt = "n")
+
+plotRLE(set_upper, outline=FALSE, ylim=c(-1, 1), col=colors[x], xlab="Upper qunatile", xaxt = "n") 
+
+plotRLE(set_tmm, outline=FALSE, ylim=c(-3, 3), col=colors[x], xlab="TMM - EdgeR", xaxt = "n")
+
+plotRLE(set_mmDeseq, outline=FALSE, ylim=c(-3, 3), col=colors[x], xlab="Median of Ratios - DESEq", xaxt = "n")
+
+pcas_names <- c(names(p_dat.comp.norm))
+
+pcaplot_list <- list()
+
+for (i in pcas_names) {
+  #nudge <- position_nudge(y = 1)
+  p <- plotPCA(human.vsd, intgroup=i) +
+    #geom_text(aes(label = name), position = nudge) +
+    theme_classic()
+  pcaplot_list[[i]] <- p
+}
+
+pcaplot_list[1:2]
+```
+
+
+# Session information
+```{r}
+sessionInfo() 
+```
+
